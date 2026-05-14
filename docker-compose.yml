@@ -1,0 +1,166 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: online_class_db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: online_class
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - online_class_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: online_class_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - online_class_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    container_name: online_class_minio
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - online_class_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  livekit:
+    image: livekit/livekit-server:latest
+    container_name: online_class_livekit
+    command: --dev --config /etc/livekit.yaml
+    ports:
+      - "7880:7880"
+      - "7881:7881"
+      - "7882:7882/udp"
+    volumes:
+      - ./docker/livekit.yaml:/etc/livekit.yaml
+    networks:
+      - online_class_network
+    depends_on:
+      - redis
+
+  coturn:
+    image: coturn/coturn:latest
+    container_name: online_class_coturn
+    network_mode: host
+    environment:
+      TURN_USERNAME: turn_user
+      TURN_PASSWORD: turn_password
+      REALM: online-class.local
+    volumes:
+      - ./docker/turnserver.conf:/etc/turnserver.conf
+    restart: unless-stopped
+
+  yjs-websocket:
+    image: yjs/y-websocket:latest
+    container_name: online_class_yjs
+    environment:
+      PORT: 1234
+    ports:
+      - "1234:1234"
+    networks:
+      - online_class_network
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: online_class_backend
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/online_class?schema=public
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: your-super-secret-jwt-key-change-in-production
+      JWT_REFRESH_SECRET: your-super-secret-refresh-token-key
+      JWT_EXPIRES_IN: 15m
+      JWT_REFRESH_EXPIRES_IN: 7d
+      PORT: 3001
+      NODE_ENV: production
+      FRONTEND_URL: http://localhost:3000
+      MINIO_ENDPOINT: minio
+      MINIO_PORT: 9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: class-recordings
+      MINIO_USE_SSL: false
+      LIVEKIT_API_KEY: devkey
+      LIVEKIT_API_SECRET: secret
+      LIVEKIT_WS_URL: ws://livekit:7880
+      TURN_HOST: localhost
+      TURN_USERNAME: turn_user
+      TURN_PASSWORD: turn_password
+    ports:
+      - "3001:3001"
+    volumes:
+      - ./backend:/app
+      - /app/node_modules
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      livekit:
+        condition: service_started
+    networks:
+      - online_class_network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:3001
+        NEXT_PUBLIC_LIVEKIT_WS_URL: ws://localhost:7880
+        NEXT_PUBLIC_WHITEBOARD_WS_URL: ws://localhost:1234
+    container_name: online_class_frontend
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:3001
+      NEXT_PUBLIC_LIVEKIT_WS_URL: ws://localhost:7880
+      NEXT_PUBLIC_WHITEBOARD_WS_URL: ws://localhost:1234
+    depends_on:
+      - backend
+    networks:
+      - online_class_network
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+
+networks:
+  online_class_network:
+    driver: bridge
